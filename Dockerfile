@@ -40,10 +40,12 @@ RUN python3 -m pip install \
         "paddleocr[doc-parser]==3.6.0"
 
 # 3) faster-whisper (CTranslate2 4.x + CUDA 12 / cuDNN 9)
+#    nvidia-cuda-nvtx-cu12 修复 PaddlePaddle 缺 libnvToolsExt.so.1 的问题
 RUN python3 -m pip install \
         faster-whisper==1.2.1 \
         nvidia-cublas-cu12 \
-        nvidia-cudnn-cu12
+        nvidia-cudnn-cu12 \
+        nvidia-cuda-nvtx-cu12
 
 # 4) MinerU core (vlm + pipeline + gradio，不含 vllm 集成层；vllm 已在基础镜像)
 RUN python3 -m pip install \
@@ -60,9 +62,9 @@ RUN python3 -m pip install \
 # 把 HF / PaddleX / MinerU 的模型缓存全部指过去 = 模型只下载一次，所有 worker 共享
 ENV HF_HOME=/runpod-volume/cache/hf \
     HUGGINGFACE_HUB_CACHE=/runpod-volume/cache/hf \
-    PADDLE_PDX_CACHE_HOME=/runpod-volume/cache/paddlex \
-    MINERU_MODEL_SOURCE=local \
-    MINERU_MODELS_DIR=/runpod-volume/cache/mineru
+    PADDLE_PDX_CACHE_HOME=/runpod-volume/cache/paddlex
+# MinerU 默认从 huggingface 拉 (会缓存到 HF_HOME -> Volume)
+# 早先的 MINERU_MODEL_SOURCE=local 因为 local config 不存在导致 NoneType.get() crash
 
 # --- handler ---
 WORKDIR /workspace
