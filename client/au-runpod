@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""
+au-runpod — 统一调用 RunPod Serverless 三合一 endpoint
+
+任务:
+  asr     语音转文字 (faster-whisper, 多语言含中文)
+  ocr     PaddleOCR PP-StructureV3 (中文 PDF → Markdown)
+  mineru  MinerU 3.x (英文学术 PDF / 公式 / 表格 → Markdown)
+
+用法:
+  export RUNPOD_ENDPOINT_ID=xxx
+  export RUNPOD_API_KEY=yyy
+
+  au-runpod asr   ~/Downloads/meeting.m4a -o transcript.txt -l zh
+  au-runpod ocr   ~/Downloads/史料.pdf    -o doc.md
+  au-runpod mineru https://arxiv.org/pdf/2310.06825.pdf -o paper.md
+  au-runpod asr   ~/Downloads/audio.mp3 --backend vlm-transformers
+
+入参支持:
+  - 本地文件 (自动 base64 编码,<25MB) 或
+  - HTTPS URL (远端文件,无大小限制)
+"""
+import argparse
+import base64
+import json
+import mimetypes
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+try:
+    import requests
+except ImportError:
+    print("缺依赖: pip3 install requests", file=sys.stderr)
+    sys.exit(1)
+
+
+ENDPOINT_ID = os.environ.get("RUNPOD_ENDPOINT_ID")
+API_KEY = os.environ.get("RUNPOD_API_KEY")
+API_BASE = "https://api.runpod.ai/v2"
+MAX_BASE64_BYTES = 20 * 1024 * 1024  # 20 MB 以下直接 base64
+
+if not ENDPOINT_ID or not API_KEY:
+    print("错误: 必须设置 RUNPOD_ENDPOINT_ID 和 RUNPOD_API_KEY 环境变量", file=sys.stderr)
+    print("    export RUNPOD_ENDPOINT_ID=xxx", file=sys.stderr)
+    print("    export RUNPOD_API_KEY=yyy", file=sys.stderr)
+    sys.exit(1)
+
+
+def _input_payload(source):
+    """根据 source 判断走 url 还是 data。"""
+    if re.match(r"^https?://", source):
+        return {"url": source}
+    path = Path(source).expanduser()
+    if not path.exists():
+        sys.exit(f"错误: 文件不存在 {path}")
+    size = path.stat().st_size
+    if size > MAX_BASE64_BYTES:
+        sys.exit(
+            f"错误: 文件 {size/1e6:.1f} MB 超过 base64 阈值 {MAX_BASE64_BYTES/1e6:.0f} MB\n"
+            "    请先上传到可公网访问的 HTTPS URL (Dropbox / S3 / etc.) 再传 URL"
+        )
+    print(f"[io] base64 编码本地文件 ({size/1e6:.1f} MB)...", flush=True)
+    return {"data": base64.b64encode(path.read_bytes()).decode("ascii")}
+
+
+def submit(task, source, opts):
+    payload = {"input": {"task": task, **_input_payload(source), **opts}}
+    r = requests.post(
+        f"{API_BASE}/{ENDPOINT_ID}/run",
+        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=120,
+    )
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def poll(job_id, max_seconds=3600):
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    start = time.time()
+    last_status = None
+    while True:
+        elapsed = time.time() - start
+        if elapsed > max_seconds:
+            raise TimeoutError(f"任务 {job_id} 超过 {max_seconds}s 未完成")
+        r = requests.get(f"{API_BASE}/{ENDPOINT_ID}/status/{job_id}", headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        status = data["status"]
+        if status != last_status:
+            print(f"[{int(elapsed):4d}s] {status}", flush=True)
+            last_status = status
+        if status in ("COMPLETED", "FAILED", "CANCELLED"):
+            return data
+        time.sleep(3 if status == "IN_PROGRESS" else 5)
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="统一调用 RunPod Serverless 三合一 endpoint",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("task", choices=["asr", "ocr", "mineru"])
+    p.add_argument("source", help="本地文件路径或 HTTPS URL")
+    p.add_argument("-o", "--output", help="输出文件 (默认 stdout)")
+    p.add_argument("-l", "--language", help="语言提示 (asr/mineru): zh, en, ...")
+    p.add_argument("--backend", help="MinerU backend: pipeline | vlm-transformers")
+    p.add_argument("--timeout", type=int, default=3600, help="最大等待秒数,默认 3600")
+    p.add_argument("--raw", action="store_true", help="输出完整 JSON 而非纯文本")
+    args = p.parse_args()
+
+    opts = {}
+    if args.language:
+        opts["language"] = args.language
+    if args.backend:
+        opts["backend"] = args.backend
+
+    print(f"[submit] task={args.task}  source={args.source[:60]}", flush=True)
+    job_id = submit(args.task, args.source, opts)
+    print(f"[submit] job_id={job_id}", flush=True)
+
+    result = poll(job_id, args.timeout)
+    if result["status"] != "COMPLETED":
+        print(f"[fail] {json.dumps(result, indent=2, ensure_ascii=False)}", file=sys.stderr)
+        sys.exit(1)
+
+    output = result.get("output") or {}
+    if isinstance(output, dict) and "error" in output:
+        print(f"[handler-error] {output.get('error')}", file=sys.stderr)
+        if output.get("traceback"):
+            print(output["traceback"], file=sys.stderr)
+        sys.exit(2)
+
+    if args.raw:
+        text_out = json.dumps(output, ensure_ascii=False, indent=2)
+    elif args.task == "asr":
+        text_out = output.get("text", "") if isinstance(output, dict) else str(output)
+    else:
+        text_out = output.get("markdown", "") if isinstance(output, dict) else str(output)
+
+    if args.output:
+        Path(args.output).expanduser().write_text(text_out, encoding="utf-8")
+        print(f"[ok] 写入 {len(text_out)} 字符 -> {args.output}", flush=True)
+    else:
+        sys.stdout.write(text_out)
+        if not text_out.endswith("\n"):
+            sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()
