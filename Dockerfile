@@ -45,7 +45,7 @@ RUN python3 -m pip install \
         faster-whisper==1.2.1 \
         nvidia-cublas-cu12 \
         nvidia-cudnn-cu12 \
-        nvidia-cuda-nvtx-cu12
+        nvidia-nvtx-cu12
 
 # 4) MinerU core (vlm + pipeline + gradio，不含 vllm 集成层；vllm 已在基础镜像)
 RUN python3 -m pip install \
