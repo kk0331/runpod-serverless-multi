@@ -57,14 +57,28 @@ RUN python3 -m pip install \
         runpod \
         boto3
 
+# --- 修 W1: 把 pip-installed nvidia 库写入 ld.so.conf 让系统能找 ---
+# PaddlePaddle 直接 dlopen libnvToolsExt.so.1，需要在 LD 路径里
+RUN python3 -c "import nvidia.nvtx, os; print(os.path.dirname(nvidia.nvtx.__file__))" \
+        > /tmp/nvtx_root && \
+    NVTX_ROOT=$(cat /tmp/nvtx_root) && \
+    SITE_PKG=$(dirname $(dirname $NVTX_ROOT)) && \
+    { echo "$SITE_PKG/nvidia/nvtx/lib"; \
+      echo "$SITE_PKG/nvidia/cublas/lib"; \
+      echo "$SITE_PKG/nvidia/cudnn/lib"; \
+      echo "$SITE_PKG/nvidia/cuda_runtime/lib"; } \
+    > /etc/ld.so.conf.d/nvidia-pip.conf && \
+    ldconfig && \
+    ldconfig -p | grep -i nvToolsExt || true
+
 # --- 缓存重定向到 Network Volume ---
 # RunPod Serverless 把 Network Volume 自动挂载到 /runpod-volume
 # 把 HF / PaddleX / MinerU 的模型缓存全部指过去 = 模型只下载一次，所有 worker 共享
 ENV HF_HOME=/runpod-volume/cache/hf \
     HUGGINGFACE_HUB_CACHE=/runpod-volume/cache/hf \
-    PADDLE_PDX_CACHE_HOME=/runpod-volume/cache/paddlex
-# MinerU 默认从 huggingface 拉 (会缓存到 HF_HOME -> Volume)
-# 早先的 MINERU_MODEL_SOURCE=local 因为 local config 不存在导致 NoneType.get() crash
+    PADDLE_PDX_CACHE_HOME=/runpod-volume/cache/paddlex \
+    MINERU_MODEL_SOURCE=huggingface
+# 显式 huggingface 防止 MinerU 走 local 分支 (local_models_config=None crash)
 
 # --- handler ---
 WORKDIR /workspace

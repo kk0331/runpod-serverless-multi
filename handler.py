@@ -166,26 +166,32 @@ def task_ocr(job_input):
 
 
 def task_mineru(job_input):
+    # MinerU 3.x: 直接调 Python API 比 CLI 更可控
+    # CLI (`mineru -p`) 在 3.2.x 行为不稳定 (有时启 FastAPI server 而不是批处理)
     pdf_path = _materialize_input(job_input, suffix=".pdf")
     out_dir = tempfile.mkdtemp(prefix="mineru_")
     try:
-        backend = job_input.get("backend", "pipeline")  # pipeline | vlm-transformers
-        cmd = ["mineru", "-p", pdf_path, "-o", out_dir, "-b", backend]
-        lang = job_input.get("language")
-        if lang:
-            cmd.extend(["-l", lang])
-        print(f"[mineru] {' '.join(cmd)}", flush=True)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"mineru failed (exit {proc.returncode})\n"
-                f"stdout: {proc.stdout[-2000:]}\nstderr: {proc.stderr[-2000:]}"
-            )
+        from mineru.cli.common import do_parse, read_fn
+        backend = job_input.get("backend", "pipeline")
+        lang = job_input.get("language", "ch")  # ch | en | ja | korean | ...
+        pdf_bytes = read_fn(pdf_path)
+        do_parse(
+            output_dir=out_dir,
+            pdf_file_names=[os.path.basename(pdf_path).replace(".pdf", "")],
+            pdf_bytes_list=[pdf_bytes],
+            p_lang_list=[lang],
+            backend=backend,
+            parse_method="auto",
+        )
+        # do_parse writes to <out_dir>/<name>/<backend>/...md
         md_files = glob.glob(os.path.join(out_dir, "**", "*.md"), recursive=True)
         if not md_files:
-            raise RuntimeError(f"no .md output; stdout={proc.stdout[-1000:]}")
-        with open(md_files[0], encoding="utf-8") as f:
-            return {"markdown": f.read(), "output_file": os.path.basename(md_files[0])}
+            raise RuntimeError(f"no .md output in {out_dir}")
+        # pick the main markdown (usually <name>.md, not _content_list.md)
+        main_md = [f for f in md_files if not f.endswith("_content_list.md") and not f.endswith("_middle.md")]
+        target = main_md[0] if main_md else md_files[0]
+        with open(target, encoding="utf-8") as f:
+            return {"markdown": f.read(), "output_file": os.path.basename(target)}
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
         try:
